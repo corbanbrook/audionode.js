@@ -1,0 +1,7 @@
+--AudioNode.js
+
+This lib is intended to be a javascript implemention of the proposed Google Web Audio API 
+by Chris Rogers http://chromium.googlecode.com/svn/trunk/samples/audio/specification/specification.html
+
+This will allow features to be quickly tested on the Mozilla Audio Data API implementation and be 
+easy to adapt to changes as the specification matures.
