@@ -22,7 +22,15 @@ function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
       }
     }
   };
+
   this.__routePull = function(data, time) {
+  };
+
+  this.__pullFromInput = function(input, data, time) {
+    var input = this.__connectedFrom[input];
+    if(input) {
+      input.__routePull(data, time);
+    }
   };
 }
 
@@ -104,7 +112,7 @@ function AudioGainNode(context, template) {
   this.gain = { value: 1.0 };
   
   this.__routePull = function(data, time) {
-    this.__connectedFrom[0].__routePull(data, time);
+    this.__pullFromInput(0, data, time);
     
     var gain = this.gain.value;
     for(var i=0;i<data.length;++i) data[i] *= gain;
@@ -116,6 +124,7 @@ function AudioSourceNode(context, numberOfOutputs, sampleRate) {
   AudioNode.call(this, context, numberOfOutputs, 0, sampleRate);
 
   this.playbackRate = { value: 1.0 };
+  this.gain = { value: 1.0 };
   
   this.__pullData = function(data, time) {
   };
@@ -138,7 +147,7 @@ function AudioSourceNode(context, numberOfOutputs, sampleRate) {
 function AudioBufferSourceNode(context) {
   AudioSourceNode.call(this, context, 1, 44100);
 
-  this.buffer = null; // TODO setter to update sampleRate
+  this.buffer = null;
   this.loop = false;
   
   var isOn = false, currentOffset;
@@ -201,7 +210,7 @@ function ConvolverNode(context) {
   this.buffer = null;
 
   this.__routePull = function(data, time) {
-    this.__connectedFrom[0].__routePull(data, time);
+    this.__pullFromInput(0, data, time);
   };
 }
 
@@ -212,7 +221,7 @@ function AudioLow2PassFilterNode(context, template) {
   this.resonance = {};
 
   this.__routePull = function(data, time) {
-    this.__connectedFrom[0].__routePull(data, time);
+    this.__pullFromInput(0, data, time);
   };
 }
 
@@ -225,7 +234,7 @@ function AudioMixerInputNode(context, mixer, index, template) {
   this.__mixer = mixer;
 
   this.__routePull = function(data, time) {
-    this.__connectedFrom[0].__routePull(data, time);
+    this.__pullFromInput(0, data, time);
   };
 }
 
@@ -243,7 +252,7 @@ function AudioMixerNode(context) {
   this.__routePull = function(data, time) {
     for(var i=0;i<this.numberOfInputs;i++) {
       var inputData = new Float32Array(data.length);
-      this.__connectedFrom[i].__routePull(inputData, time);
+      this.__pullFromInput(i, inputData, time);
       
       for(var j=0;j<data.length;++j) {
         data[j] += inputData[j];
@@ -259,7 +268,7 @@ function AudioPannerNode(context, template) {
   this.setPosition = function(x, y, z) {};
 
   this.__routePull = function(data, time) {
-    this.__connectedFrom[0].__routePull(data, time);
+    this.__pullFromInput(0, data, time);
   };
 }
 AudioPannerNode.HRTF = 2;
@@ -271,7 +280,7 @@ function AudioDestinationNode(context, tickCallback) {
   var CHANNELS = 1;
   var PREBUFFER_SIZE = 20000;
   var PORTION_SIZE = 1024;
-  AudioNode.call(this, context, 0, 1, 44100);
+  AudioNode.call(this, context, 0, 1, SAMPLE_RATE);
   
   var audio = new Audio();
   audio.mozSetup(CHANNELS, SAMPLE_RATE, 1);
@@ -280,13 +289,9 @@ function AudioDestinationNode(context, tickCallback) {
   
   this.__audio = audio;
 
-  this.__routePull = function(data, time) {
-    this.__connectedFrom[0].__routePull(data, time);
-  };
-  
   function pullData(chunkSize, time) {
     var data = new Float32Array(chunkSize);
-    destination.__routePull(data,time);
+    destination.__pullFromInput(0, data, time);
     return data;
   }
   
