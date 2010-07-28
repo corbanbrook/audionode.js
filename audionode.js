@@ -1,25 +1,98 @@
+function AudioConnection(input, output) {
+  if(!(input instanceof AudioInput)) throw "input is not AudioInput";
+  if(!(output instanceof AudioOutput)) throw "output is not AudioOutput";
+
+  this.input = input;
+  this.output = output;
+  input.connect(this);
+  output.connect(this);
+}
+AudioConnection.prototype.disconnect = function() {
+  this.input.disconnect(this);  
+  this.output.disconnect(this);
+};
+
+function AudioInput(node, index) {
+  this.node = node;
+  this.index = index;
+  this.connections = [];
+}
+AudioInput.prototype.connect = function(connection) {
+  this.connections.push(connection);
+}
+AudioInput.prototype.disconnect = function(connection) {
+  var i=0;
+  while(i < this.connections.length && this.connections[i] !== connection) {
+    ++i;
+  }
+  this.connections.splice(i, 1);
+}
+AudioInput.prototype.__pullData = function(data, time) {
+  var connectionsCount = this.connections.length;
+  if(connectionsCount === 0) {
+    return;
+  } else if(connectionsCount === 1) {
+    this.connections[0].output.node.__routePull(data, time, this);
+  } else {
+    // mixing
+    for(var i=0;i<connectionsCount;++i) {
+      var inputData = new Float32Array(data.length);
+      this.connections[i].output.node.__routePull(inputData, time, this);
+      
+      for(var j=0;j<data.length;++j) {
+        data[j] += inputData[j];
+      }
+    }
+  }
+}
+
+function AudioOutput(node, index) {
+  this.node = node;
+  this.index = index;
+  this.connections = [];
+}
+AudioOutput.prototype.connect = function(connection) {
+  this.connections.push(connection);
+}
+AudioOutput.prototype.disconnect = function(connection) {
+  var i=0;
+  while(i < this.connections.length && this.connections[i] !== connection) {
+    ++i;
+  }
+  this.connections.splice(i, 1);
+}
+
 function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
   this.numberOfInputs = numberOfInputs;
   this.numberOfOutputs = numberOfOutputs;
   this.sampleRate = sampleRate;
 
+  var i;
   this.__context = context;
-  this.__connectedTo = [];
-  this.__connectedFrom = [];
+  this.__inputs = [];
+  for(i=0;i<numberOfInputs;++i) {
+    this.__inputs[i] = new AudioInput(this);
+  }
+  this.__outputs = [];
+  for(i=0;i<numberOfOutputs;++i) {
+    this.__outputs[i] = new AudioOutput(this);
+  }
 
   this.connect = function(destination, output, input) {
-    this.__connectedTo[output || 0] = destination;
+    var outputPin = this.__outputs[output || 0];
+    var inputPin = destination.__inputs[input || 0];
     
-    destination.__connectedFrom[input || 0] = this;
+    return new AudioConnection(inputPin, outputPin);
   };
 
   this.disconnect = function(output) {
-    var destination = this.__connectedTo[output || 0];
-    this.__connectedTo[output || 0] = null;
-    for(var i=0;i<destination.__connectedFrom.length;i++) {
-      if(destination.__connectedFrom[i] === this) {
-        destination.__connectedFrom[i] = null;
-      }
+    var outputPin = this.__outputs[output || 0];
+    var connections = []; 
+    for(var j=0;j<outputPin.connections.length;++j) {
+      connections = outputPin.connections[j];
+    }
+    while(connections.length > 0) {
+      connections.pop().disconnect();
     }
   };
 
@@ -27,11 +100,17 @@ function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
   };
 
   this.__pullFromInput = function(input, data, time) {
-    var input = this.__connectedFrom[input];
-    if(input) {
-      input.__routePull(data, time);
-    }
+    this.__inputs[input].__pullData(data, time);
   };
+
+  this.__dispose = function() {
+    for(var j=0;j<this.__outputs;++j) {
+      this.disconnect(j);
+    }
+    if(this.ondispose) this.ondispose(); 
+  }
+
+  this.ondispose = null;
 }
 
 function AudioBuffer(data, channels, sampleRate) {
@@ -91,7 +170,7 @@ function AudioRequest(url, async) {
           callback(null);
       }   
     };
-    req.send(null);   
+    req.send(null);
   } 
   
   this.onload = function() {};
@@ -106,7 +185,7 @@ function AudioRequest(url, async) {
   };
 }
 
-function AudioGainNode(context, template) {
+function AudioGainNode(context) {
   AudioNode.call(this, context, 1, 1, 44100);
 
   this.gain = { value: 1.0 };
@@ -157,7 +236,8 @@ function AudioBufferSourceNode(context) {
   this.noteGrainOn = function(when, grainOffset, grainDuration) { throw "not implemented"; };
   this.noteOff = function(when) { offWhen = when||0; };
   
-  this.__pullData = function(data, time) {
+  this.__pullData = function(data, time, via) {
+    var disposing = false;
     if(onWhen !== null) {
       if(onWhen <= time) { 
         if(!isOn) { 
@@ -169,6 +249,7 @@ function AudioBufferSourceNode(context) {
     }
     if(offWhen !== null) {
       if(offWhen <= time) { 
+        disposing = true;
         isOn = false; 
         offWhen = null; 
       }
@@ -200,6 +281,10 @@ function AudioBufferSourceNode(context) {
           }
         }
       }
+      disposing = !isOn;
+    }
+    if(disposing) {
+      this.dispose();
     }
   };
 }
@@ -214,7 +299,7 @@ function ConvolverNode(context) {
   };
 }
 
-function AudioLow2PassFilterNode(context, template) {
+function AudioLow2PassFilterNode(context) {
   AudioNode.call(this, context, 1, 1, 44100);
 
   this.cutoff = {};
@@ -225,7 +310,8 @@ function AudioLow2PassFilterNode(context, template) {
   };
 }
 
-function AudioMixerInputNode(context, mixer, index, template) {
+// depricated
+function AudioMixerInputNode(context, mixer, index) {
   AudioNode.call(this, context, 1, 1, 44100);
 
   this.gain = { value: 1.0 };
@@ -238,30 +324,32 @@ function AudioMixerInputNode(context, mixer, index, template) {
   };
 }
 
+// depricated
 function AudioMixerNode(context) {
-  AudioNode.call(this, context, 1, 0);
+  AudioNode.call(this, context, 1, 1, 44100);
 
-  this.createInput = function(template) {
-    var input = new AudioMixerInputNode(context, this, this.numberOfInputs, template);
-    input.connect(this, 0, this.numberOfInputs);
-    ++this.numberOfInputs;
+  this.createInput = function(owner) {
+    var index = this.numberOfInputs++;
+    var input = new AudioMixerInputNode(context, this, index);
+    this.__inputs.push(new AudioInput(this));
+    input.connect(this);
+
+    if(owner) {
+      var lastCallback = owner.ondispose;
+      owner.ondispose = function() {
+        this.__dispose(); if(lastCallback) { lastCallback(); }
+      }
+    }
     return input;
   };
   this.outputGain = { value: 1.0 };
 
   this.__routePull = function(data, time) {
-    for(var i=0;i<this.numberOfInputs;i++) {
-      var inputData = new Float32Array(data.length);
-      this.__pullFromInput(i, inputData, time);
-      
-      for(var j=0;j<data.length;++j) {
-        data[j] += inputData[j];
-      }
-    }
+    this.__pullFromInput(0, data, time);
   };
 }
 
-function AudioPannerNode(context, template) {
+function AudioPannerNode(context) {
   AudioNode.call(this, context, 1, 1, 44100);
 
   this.panningModel = AudioPannerNode.HRTF;
@@ -273,6 +361,42 @@ function AudioPannerNode(context, template) {
 }
 AudioPannerNode.HRTF = 2;
 
+function RealtimeAnalyserNode(context) {
+  AudioNode.call(this, context, 1, 1, 44100);
+  
+  this.getFloatFrequencyData = function(array) {};
+  this.getByteFrequencyData = function(array) {};
+
+  // Real-time waveform data         
+  this.getByteTimeDomainData = function(array) {};
+
+  this.fftSize = 1024;
+  this.frequencyBinCount = 1024;
+
+  this.minDecibels = -50;
+  this.maxDecibels = -10;
+
+  this.smoothingTimeConstant = 0.0; 
+
+  this.__routePull = function(data, time) {
+    this.__pullFromInput(0, data, time);
+  };
+}
+
+function AudioElementSourceNode(context, audioElement) {
+  AudioNode.call(this, context, 1, 1, 44100);
+
+  var audioAvailable = function(event) {
+    // dispatch audio down the chain
+    var frameBuffer = event.frameBuffer;
+    for (var i in outputs) {
+      // this.outputs[i].send(frameBuffer);
+    }
+  };
+
+  audioElement.eventListener('mozaudiowritten', audioAvailable, false);
+}
+
 function AudioDestinationNode(context, tickCallback) {
   var destination = this;
   
@@ -283,7 +407,7 @@ function AudioDestinationNode(context, tickCallback) {
   AudioNode.call(this, context, 0, 1, SAMPLE_RATE);
   
   var audio = new Audio();
-  audio.mozSetup(CHANNELS, SAMPLE_RATE, 1);
+  audio.mozSetup(CHANNELS, SAMPLE_RATE);
   var readOffset = 0;
   var writeOffset = 0;
   
@@ -323,6 +447,17 @@ function AudioContext() {
 
   this.destination = new AudioDestinationNode(this, tick);
 
+  function setOwner(obj, owner) {
+    if(!owner) {
+      return obj;
+    }
+    var lastCallback = owner.ondispose;
+    owner.ondispose = function() {
+      obj.__dispose(); if(lastCallback) { lastCallback(); }
+    }
+    return obj;
+  }
+
   this.createConvolver = function() {
     return new ConvolverNode(this);
   };
@@ -336,35 +471,30 @@ function AudioContext() {
     return new AudioBufferSourceNode(this);
   };
 
-  this.createGainNode = function() {
-    return new AudioGainNode(this);
+  this.createGainNode = function(owner) {
+    return setOwner(new AudioGainNode(this), owner);
   };
 
-  this.createLowPass2Filter = function() {
-    return new AudioLow2PassFilterNode(this);
+  this.createLowPass2Filter = function(owner) {
+    return setOwner(new AudioLow2PassFilterNode(this), owner);
   };
 
-  // undocumented
+  // depricated
   this.createMixer = function() {
     return new AudioMixerNode(this);
   };
 
-  this.createPanner = function() {
-    return new AudioPannerNode(this);
+  this.createPanner = function(owner) {
+    return setOwner(new AudioPannerNode(this), owner);
+  };
+
+  this.createAnalyser = function() {
+    return new RealtimeAnalyserNode(this);
+  };
+
+  this.createAudioSource = function(audioElement) {
+    return new AudioElementSourceNode(this, audioElement);
   };
 }
 
-/*
-function AudioElementSourceNode(audioElement) {
-  this.audioAvailable = function(event) {
-    // dispatch audio down the chain
-    var frameBuffer = event.mozFrameBuffer;
-    for (var i in outputs) {
-      this.outputs[i].send(frameBuffer);
-    }
-  };
 
-  audioElement.eventListener('audiowritten', this.audioAvailable, false);
-}
-AudioElementSourceNode.prototype = new AudioNode(); // AudioElementSourceNode inherits from AudioNode
-*/
