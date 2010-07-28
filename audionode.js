@@ -8,7 +8,7 @@ function AudioConnection(input, output) {
   output.connect(this);
 }
 AudioConnection.prototype.disconnect = function() {
-  this.input.disconnect(this);  
+  this.input.disconnect(this);
   this.output.disconnect(this);
 };
 
@@ -71,11 +71,11 @@ function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
   this.__context = context;
   this.__inputs = [];
   for(i=0;i<numberOfInputs;++i) {
-    this.__inputs[i] = new AudioInput(this);
+    this.__inputs.push(new AudioInput(this, i));
   }
   this.__outputs = [];
   for(i=0;i<numberOfOutputs;++i) {
-    this.__outputs[i] = new AudioOutput(this);
+    this.__outputs.push(new AudioOutput(this, i));
   }
 
   this.connect = function(destination, output, input) {
@@ -87,10 +87,7 @@ function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
 
   this.disconnect = function(output) {
     var outputPin = this.__outputs[output || 0];
-    var connections = []; 
-    for(var j=0;j<outputPin.connections.length;++j) {
-      connections = outputPin.connections[j];
-    }
+    var connections = outputPin.connections.slice(0, outputPin.connections.length);
     while(connections.length > 0) {
       connections.pop().disconnect();
     }
@@ -103,8 +100,12 @@ function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
     this.__inputs[input].__pullData(data, time);
   };
 
+  var disposed = false;
   this.__dispose = function() {
-    for(var j=0;j<this.__outputs;++j) {
+    if(disposed) return;
+
+    disposed = true;
+    for(var j=0;j<this.__outputs.length;++j) {
       this.disconnect(j);
     }
     if(this.ondispose) this.ondispose(); 
@@ -237,19 +238,19 @@ function AudioBufferSourceNode(context) {
   this.noteOff = function(when) { offWhen = when||0; };
   
   this.__pullData = function(data, time, via) {
-    var disposing = false;
+    var wasOn = isOn;
     if(onWhen !== null) {
       if(onWhen <= time) { 
         if(!isOn) { 
           isOn = true;
           currentOffset = 0;
+          wasOn = true;
         }
         onWhen = null; 
       }
     }
     if(offWhen !== null) {
       if(offWhen <= time) { 
-        disposing = true;
         isOn = false; 
         offWhen = null; 
       }
@@ -281,10 +282,9 @@ function AudioBufferSourceNode(context) {
           }
         }
       }
-      disposing = !isOn;
     }
-    if(disposing) {
-      this.dispose();
+    if(wasOn && !isOn) {
+      this.__dispose();
     }
   };
 }
@@ -331,13 +331,12 @@ function AudioMixerNode(context) {
   this.createInput = function(owner) {
     var index = this.numberOfInputs++;
     var input = new AudioMixerInputNode(context, this, index);
-    this.__inputs.push(new AudioInput(this));
     input.connect(this);
 
     if(owner) {
       var lastCallback = owner.ondispose;
       owner.ondispose = function() {
-        this.__dispose(); if(lastCallback) { lastCallback(); }
+        input.__dispose(); if(lastCallback) { lastCallback(); }
       }
     }
     return input;
@@ -419,7 +418,19 @@ function AudioDestinationNode(context, tickCallback) {
     return data;
   }
   
+  var buffer = null;
   function tick() {
+    var written;
+    if(buffer) {
+      written = audio.mozWriteAudio(buffer);
+      if(written < buffer.length) {
+        buffer = buffer.slice(written, buffer.length - written);
+        return;
+      } else {
+        buffer = null;
+      }
+    }
+
     var currentOffset = audio.mozCurrentSampleOffset();
     if(readOffset < currentOffset) {
       var time = currentOffset / SAMPLE_RATE / CHANNELS;
@@ -427,7 +438,10 @@ function AudioDestinationNode(context, tickCallback) {
     }
     if(currentOffset + PREBUFFER_SIZE >= writeOffset) {
       var data = pullData(PORTION_SIZE, writeOffset / SAMPLE_RATE / CHANNELS);
-      audio.mozWriteAudio(data);
+      written = audio.mozWriteAudio(data);
+      if(written < data.length) {
+        buffer = data.slice(written, data.length - written);
+      }
       writeOffset += PORTION_SIZE;
     }
     readOffset = currentOffset;
@@ -458,8 +472,8 @@ function AudioContext() {
     return obj;
   }
 
-  this.createConvolver = function() {
-    return new ConvolverNode(this);
+  this.createConvolver = function(owner) {
+    return setOwner(new ConvolverNode(this), owner);
   };
 
   // undocumented
@@ -467,8 +481,8 @@ function AudioContext() {
     return new AudioRequest(url, async);
   };
 
-  this.createBufferSource = function() {
-    return new AudioBufferSourceNode(this);
+  this.createBufferSource = function(owner) {
+    return setOwner(new AudioBufferSourceNode(this), owner);
   };
 
   this.createGainNode = function(owner) {
@@ -480,8 +494,8 @@ function AudioContext() {
   };
 
   // depricated
-  this.createMixer = function() {
-    return new AudioMixerNode(this);
+  this.createMixer = function(owner) {
+    return setOwner(new AudioMixerNode(this), owner);
   };
 
   this.createPanner = function(owner) {
