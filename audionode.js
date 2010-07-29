@@ -1,3 +1,36 @@
+
+function SoundData(channels, count) {
+  this.channels = channels;
+  this.count = count;
+  this.samples = new Array(channels);
+  for(var i=0;i<channels;++i) {
+    this.samples[i] = new Float32Array(count);    
+  }
+}
+SoundData.prototype.createNew = function() {
+  return new SoundData(this.channels, this.count);
+};
+SoundData.prototype.interleave = function() {
+  var channels = this.channels, count = this.count;
+  var len = channels * count;
+  var data = new Float32Array(len);
+  for(var k=0; k<channels; ++k) {
+    var samples = this.samples[k];
+    for(var i=k,j=0; j < count; i+=channels, ++j) {
+      data[i] = samples[j];
+    }
+  }
+  return data;
+};
+SoundData.prototype.mix = function(other) {
+  for(var i=0, channels=this.channels; i<channels; ++i) {
+    var data = this.samples[i], otherData = other.samples[i];
+    for(var j=0, count=this.count; j<count; ++j) {
+      data[j] += otherData[j];
+    }
+  }
+};
+
 function AudioConnection(input, output) {
   if(!(input instanceof AudioInput)) throw "input is not AudioInput";
   if(!(output instanceof AudioOutput)) throw "output is not AudioOutput";
@@ -27,21 +60,19 @@ AudioInput.prototype.disconnect = function(connection) {
   }
   this.connections.splice(i, 1);
 }
-AudioInput.prototype.__pullData = function(data, time) {
+AudioInput.prototype.__pullData = function(soundData, time) {
   var connectionsCount = this.connections.length;
   if(connectionsCount === 0) {
     return;
   } else if(connectionsCount === 1) {
-    this.connections[0].output.node.__routePull(data, time, this);
+    this.connections[0].output.node.__routePull(soundData, time, this);
   } else {
     // mixing
     for(var i=0;i<connectionsCount;++i) {
-      var inputData = new Float32Array(data.length);
-      this.connections[i].output.node.__routePull(inputData, time, this);
-      
-      for(var j=0;j<data.length;++j) {
-        data[j] += inputData[j];
-      }
+      var connectionSoundData = soundData.createNew();
+      this.connections[i].output.node.__routePull(connectionSoundData, time, this);
+
+      soundData.mix(connectionSoundData);
     }
   }
 }
@@ -62,10 +93,10 @@ AudioOutput.prototype.disconnect = function(connection) {
   this.connections.splice(i, 1);
 }
 
-function AudioNode(context, numberOfOutputs, numberOfInputs, sampleRate) {
+function AudioNode(context, numberOfOutputs, numberOfInputs) {
   this.numberOfInputs = numberOfInputs;
   this.numberOfOutputs = numberOfOutputs;
-  this.sampleRate = sampleRate;
+  // this.sampleRate = 0;
 
   var i;
   this.__context = context;
@@ -187,7 +218,7 @@ function AudioRequest(url, async) {
 }
 
 function AudioGainNode(context) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
 
   this.gain = { value: 1.0 };
   
@@ -200,35 +231,17 @@ function AudioGainNode(context) {
 }
 
 // undocumented
-function AudioSourceNode(context, numberOfOutputs, sampleRate) {
-  AudioNode.call(this, context, numberOfOutputs, 0, sampleRate);
-
-  this.playbackRate = { value: 1.0 };
-  this.gain = { value: 1.0 };
-  
-  this.__pullData = function(data, time) {
-  };
-  
-  var tail = 0;
-  this.__routePull = function(data, time) {
-    var playbackRate = this.playbackRate.value;
-    var samplesToPullEst = data.length * playbackRate + tail;
-    var samplesToPull = Math.floor(samplesToPullEst);
-    tail = samplesToPullEst - samplesToPull;
-    
-    var sourceData = new Float32Array(samplesToPull);
-    this.__pullData(sourceData, time);
-    for(var i=0,j=0;i<data.length;i++,j+=playbackRate) {
-      data[i] += sourceData[0|j];
-    }
-  };  
+function AudioSourceNode(context, numberOfOutputs) {
+  AudioNode.call(this, context, numberOfOutputs, 0);
 }
 
 function AudioBufferSourceNode(context) {
-  AudioSourceNode.call(this, context, 1, 44100);
+  AudioSourceNode.call(this, context, 1);
 
+  this.gain = { value: 1.0 };  
   this.buffer = null;
   this.loop = false;
+  this.playbackRate = { value: 1.0 };
   
   var isOn = false, currentOffset;
   var onWhen = null, offWhen = null;
@@ -237,7 +250,9 @@ function AudioBufferSourceNode(context) {
   this.noteGrainOn = function(when, grainOffset, grainDuration) { throw "not implemented"; };
   this.noteOff = function(when) { offWhen = when||0; };
   
-  this.__pullData = function(data, time, via) {
+  var tail = 0;
+  var self = this;
+  function pullDataFromTheBuffer(data, time, via) {
     var wasOn = isOn;
     if(onWhen !== null) {
       if(onWhen <= time) { 
@@ -255,7 +270,7 @@ function AudioBufferSourceNode(context) {
         offWhen = null; 
       }
     }
-    var buffer = this.buffer;
+    var buffer = self.buffer;
     if(isOn && buffer) {
       var tail = buffer.__numberOfSamples - currentOffset;
       var offset = 0, count = data.length;
@@ -284,13 +299,30 @@ function AudioBufferSourceNode(context) {
       }
     }
     if(wasOn && !isOn) {
-      this.__dispose();
+      self.__dispose();
     }
-  };
+  }
+
+  this.__routePull = function(soundData, time) {
+    var playbackRate = this.playbackRate.value;
+    var samplesToPullEst = soundData.count * playbackRate + tail;
+    var samplesToPull = Math.floor(samplesToPullEst);
+    tail = samplesToPullEst - samplesToPull;
+    
+    var sourceData = new Float32Array(samplesToPull);
+    pullDataFromTheBuffer(sourceData, time);
+
+    // TODO map source channels to requested data
+    var channels = soundData.channels, data = soundData.samples[0];
+    for(var i=0,j=0,count=soundData.count;i<count;i++,j+=playbackRate) {
+      data[i * channels] += sourceData[0|j];
+    }
+  };  
+
 }
 
 function ConvolverNode(context) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
 
   this.buffer = null;
 
@@ -300,19 +332,19 @@ function ConvolverNode(context) {
 }
 
 function AudioLow2PassFilterNode(context) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
 
-  this.cutoff = {};
-  this.resonance = {};
+  this.cutoff = { value: 44100 };
+  this.resonance = { value: 5.0 };
 
-  this.__routePull = function(data, time) {
-    this.__pullFromInput(0, data, time);
+  this.__routePull = function(soundData, time) {
+    this.__pullFromInput(0, soundData, time);
   };
 }
 
 // depricated
 function AudioMixerInputNode(context, mixer, index) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
 
   this.gain = { value: 1.0 };
 
@@ -326,7 +358,7 @@ function AudioMixerInputNode(context, mixer, index) {
 
 // depricated
 function AudioMixerNode(context) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
 
   this.createInput = function(owner) {
     var index = this.numberOfInputs++;
@@ -349,7 +381,7 @@ function AudioMixerNode(context) {
 }
 
 function AudioPannerNode(context) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
 
   this.panningModel = AudioPannerNode.HRTF;
   this.setPosition = function(x, y, z) {};
@@ -361,7 +393,7 @@ function AudioPannerNode(context) {
 AudioPannerNode.HRTF = 2;
 
 function RealtimeAnalyserNode(context) {
-  AudioNode.call(this, context, 1, 1, 44100);
+  AudioNode.call(this, context, 1, 1);
   
   this.getFloatFrequencyData = function(array) {};
   this.getByteFrequencyData = function(array) {};
@@ -382,20 +414,6 @@ function RealtimeAnalyserNode(context) {
   };
 }
 
-function AudioElementSourceNode(context, audioElement) {
-  AudioNode.call(this, context, 1, 1, 44100);
-
-  var audioAvailable = function(event) {
-    // dispatch audio down the chain
-    var frameBuffer = event.frameBuffer;
-    for (var i in outputs) {
-      // this.outputs[i].send(frameBuffer);
-    }
-  };
-
-  audioElement.eventListener('mozaudiowritten', audioAvailable, false);
-}
-
 function AudioDestinationNode(context, tickCallback) {
   var destination = this;
   
@@ -403,7 +421,7 @@ function AudioDestinationNode(context, tickCallback) {
   var CHANNELS = 1;
   var PREBUFFER_SIZE = 20000;
   var PORTION_SIZE = 1024;
-  AudioNode.call(this, context, 0, 1, SAMPLE_RATE);
+  AudioNode.call(this, context, 0, 1);
   
   var audio = new Audio();
   audio.mozSetup(CHANNELS, SAMPLE_RATE);
@@ -413,9 +431,10 @@ function AudioDestinationNode(context, tickCallback) {
   this.__audio = audio;
 
   function pullData(chunkSize, time) {
-    var data = new Float32Array(chunkSize);
-    destination.__pullFromInput(0, data, time);
-    return data;
+    var soundData = new SoundData(CHANNELS, chunkSize);
+    destination.__pullFromInput(0, soundData, time);
+    
+    return soundData.interleave();
   }
   
   var buffer = null;
@@ -505,10 +524,26 @@ function AudioContext() {
   this.createAnalyser = function() {
     return new RealtimeAnalyserNode(this);
   };
-
-  this.createAudioSource = function(audioElement) {
-    return new AudioElementSourceNode(this, audioElement);
-  };
 }
 
+function MediaElementAudioSourceNode(audioElement) {
+  AudioNode.call(this, null, 1, 0);
 
+  var audioAvailable = function(event) {
+    // dispatch audio down the chain
+    var frameBuffer = event.frameBuffer;
+    for (var i in outputs) {
+      // this.outputs[i].send(frameBuffer);
+    }
+  };
+
+  audioElement.addEventListener('mozaudiowritten', audioAvailable, false);
+}
+MediaElementAudioSourceNode.__getAudioSource = function() {
+  if(!("__audioSource" in this)) {
+    this.__audioSource = new MediaElementAudioSourceNode(this);
+  }
+  return this.__audioSource;
+};
+
+HTMLMediaElement.prototype.__defineGetter__("audioSource", MediaElementAudioSourceNode.__getAudioSource);
